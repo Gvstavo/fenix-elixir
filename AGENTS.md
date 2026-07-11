@@ -1,5 +1,26 @@
 This is a web application written using the Phoenix web framework.
 
+## General context
+
+This is an Elixir/SQLite3 application that uses Phoenix's native HTML (HEEx templates and LiveView) to implement a manga and novel management system. Files are stored in a local S3-compatible bucket using RustFS and the S3 API.
+
+## File storage
+
+- Files are stored in a **local S3-compatible bucket using RustFS** and the S3 API
+- Use the `:req` library to interact with the S3 API endpoints
+- Configure endpoint, bucket, and credentials via runtime config (e.g., `config/runtime.exs`)
+
+### Storage paths
+
+The following key path conventions are used in the bucket:
+
+| Path | Description |
+|------|-------------|
+| `mangas/<manga-id>/capitulos/<capitulo-id>/001.webp`, `002.webp`, ... | Chapter pages (images) of a manga |
+| `usuarios/<user-id>/profile/profile.webp` | User profile picture |
+
+**Always** follow these path conventions when uploading or retrieving files. Use zero-padded sequential numbers (`001`, `002`, ...) for chapter page files. Never hardcode these paths; build them from constants defined in `lib/fenix/constant.ex`.
+
 ## Project guidelines
 
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
@@ -84,6 +105,7 @@ custom classes must fully style the input
 - Predicate function names should not start with `is_` and should end in a question mark. Names like `is_thing` should be reserved for guards
 - Elixir's builtin OTP primitives like `DynamicSupervisor` and `Registry`, require names in the child spec, such as `{DynamicSupervisor, name: MyApp.MyDynamicSup}`, then you can use `DynamicSupervisor.start_child(MyApp.MyDynamicSup, child_spec)`
 - Use `Task.async_stream(collection, callback, options)` for concurrent enumeration with back-pressure. The majority of times you will want to pass `timeout: :infinity` as option
+- **Never** use magic numbers or magic strings in your code. All constants must be defined and saved in `lib/fenix/constant.ex` and referenced from there, keeping the codebase DRY and maintainable
 
 ## Mix guidelines
 
@@ -93,14 +115,7 @@ custom classes must fully style the input
 
 ## Test guidelines
 
-- **Always use `start_supervised!/1`** to start processes in tests as it guarantees cleanup between tests
-- **Avoid** `Process.sleep/1` and `Process.alive?/1` in tests
-  - Instead of sleeping to wait for a process to finish, **always** use `Process.monitor/1` and assert on the DOWN message:
-
-      ref = Process.monitor(pid)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
-
-   - Instead of sleeping to synchronize before the next call, **always** use `_ = :sys.get_state/1` to ensure the process has handled prior messages
+- **Never** generate any tests. Do not create test files, test cases, or test suites for this project.
 <!-- phoenix:elixir-end -->
 
 <!-- phoenix:phoenix-start -->
@@ -131,6 +146,90 @@ custom classes must fully style the input
 - You **must** use `Ecto.Changeset.get_field(changeset, :field)` to access changeset fields
 - Fields which are set programmatically, such as `user_id`, must not be listed in `cast` calls or similar for security purposes. Instead they must be explicitly set when creating the struct
 - **Always** invoke `mix ecto.gen.migration migration_name_using_underscores` when generating migration files, so the correct timestamp and conventions are applied
+
+## Ecto SQLite3 caveats and limits
+
+Limitations and caveats
+
+There are some limitations when using Ecto with SQLite that one needs to be aware of. The ones listed below are specific to Ecto usage, but it is encouraged to also view the guidance on when to use SQLite provided by the SQLite documentation, as well.
+
+### In memory robustness
+
+When using the Ecto SQLite3 adapter with the database set to `:memory` it is possible that a crash in a process performing a query in the Repo will cause the database to be destroyed. This makes the `:memory` function unsuitable when it is expected to survive potential process crashes (for example a crash in a Phoenix request).
+
+### Async Sandbox testing
+
+The Ecto SQLite3 adapter does not support async tests when used with `Ecto.Adapters.SQL.Sandbox`. This is due to SQLite only allowing up one write transaction at a time, which often does not work with the Sandbox approach of wrapping each test in a transaction.
+
+### LIKE match on BLOB columns
+
+We have the `SQLITE_LIKE_DOESNT_MATCH_BLOBS` compile-time definition option set to true, as recommended by SQLite. This means you cannot do `LIKE` queries on BLOB columns.
+
+### Case sensitivity
+
+Case sensitivity for `LIKE` is off by default, and controlled by the `:case_sensitive_like` option outlined above.
+
+However, for equality comparison, case sensitivity is always on. If you want to make a column not be case sensitive, for email storage for example, you can make it case insensitive by using the `COLLATE NOCASE` option in SQLite. This is configured via the `:collate` option.
+
+So instead of:
+
+    add :email, :string
+
+You would do:
+
+    add :email, :string, collate: :nocase
+
+### Check constraints
+
+SQLite3 supports specifying check constraints on the table or on the column definition. We currently only support adding a check constraint via a column definition, since the table definition approach only works at table-creation time and cannot be added at table-alter time. You can see more information in the SQLite3 `CREATE TABLE` documentation.
+
+Because of this, you cannot add a constraint via the normal `Ecto.Migration.constraint/3` method, as that operates via `ALTER TABLE ADD CONSTRAINT`, and this type of `ALTER TABLE` operation SQLite3 does not support. You can however get the full functionality by adding a constraint at the column level, specifying the name and expression. Per the SQLite3 documentation, there is no functional difference between a column or table constraint.
+
+Thus, adding a check constraint for a new column is as simple as:
+
+    add :email, :string, check: %{name: "test_constraint", expr: "email != 'test@example.com'"}
+
+### Handling foreign key constraints in changesets
+
+Unfortunately, unlike other databases, SQLite3 does not provide the precise name of the constraint violated, but only the columns within that constraint (if it provides any information at all). Because of this, changeset functions like `Ecto.Changeset.foreign_key_constraint/3` may not work at all.
+
+This is because the above functions depend on the Ecto Adapter returning the name of the violated constraint, which you annotate in your changeset so that Ecto can convert the constraint violation into the correct updated changeset when the constraint is hit during a `Ecto.Repo.update/2` or `Ecto.Repo.insert/2` operation. Since we cannot get the name of the violated constraint back from SQLite3 at `INSERT` or `UPDATE` time, there is no way to effectively use these changeset functions. This is a SQLite3 limitation.
+
+### Schemaless queries
+
+Using schemaless Ecto queries will not work well with SQLite. This is because the Ecto SQLite adapter relies heavily on the schema to support a rich array of Elixir types, despite the fact SQLite only has five storage classes. The query will still work and return data, but you will need to do this mapping on your own.
+
+### Transaction mode
+
+By default, SQLite transactions run in `DEFERRED` mode. However, in web applications with a balanced load of reads and writes, using `IMMEDIATE` mode may yield better performance.
+
+Here are several ways to specify a different transaction mode:
+
+- **Pass `mode: :immediate` to `Repo.transaction/2`**: Use this approach to set the transaction mode for individual transactions.
+
+      Multi.new()
+      |> Multi.run(:example, fn _repo, _changes_so_far ->
+        # ... do some work ...
+      end)
+      |> Repo.transaction(mode: :immediate)
+
+- **Define custom transaction functions**: Create wrappers, such as `Repo.immediate_transaction/2` or `Repo.deferred_transaction/2`, to easily apply different modes where needed.
+
+      defmodule MyApp.Repo do
+        def immediate_transaction(fun_or_multi) do
+          transaction(fun_or_multi, mode: :immediate)
+        end
+
+        def deferred_transaction(fun_or_multi) do
+          transaction(fun_or_multi, mode: :deferred)
+        end
+      end
+
+- **Set a global default**: Configure `:default_transaction_mode` to apply a preferred mode for all transactions, unless explicitly passed a different `:mode` to `Repo.transaction/2`.
+
+      config :my_app, MyApp.Repo,
+        database: "path/to/my/database.db",
+        default_transaction_mode: :immediate
 <!-- phoenix:ecto-end -->
 
 <!-- phoenix:html-start -->

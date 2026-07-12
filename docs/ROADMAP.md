@@ -13,10 +13,11 @@
 | **0.3.0** | Admin + CRUD catálogo | Painel administrativo, CRUD de Obras/Gêneros/Autores/Artistas |
 | **0.4.0** | Conteúdo | CRUD de Capítulos, upload de páginas WebP, leitor de novel (rich-text) |
 | **0.5.0** | Catálogo público | Home, listagens, detalhe da obra, SEO completo |
-| **0.6.0** | Métricas | Tabela ETS para contabilização de acessos, top 10 mais lidos |
-| **0.7.0** | Favoritos | Favoritar/desfavoritar, listagem de favoritos |
-| **0.8.0** | Permissões | Papel `editor`, concessão de permissão por obra |
-| **0.9.0** | Atalho de capítulos | Upload de capítulos via ZIP (síncrono) com regras de parsing |
+| **0.6.0** | Comentários | Comentários em obras (RF13) e capítulos (RF14), apenas logged-in |
+| **0.7.0** | Métricas | Tabela ETS para contabilização de acessos, top 10 mais lidos |
+| **0.8.0** | Favoritos | Favoritar/desfavoritar, listagem de favoritos |
+| **0.9.0** | Permissões | Papel `editor`, concessão de permissão por obra |
+| **0.10.0** | Atalho de capítulos | Upload de capítulos via ZIP (síncrono) com regras de parsing |
 | **1.0.0** | Oban + polimento | Oban processando ZIPs em background, refinamento final |
 
 ---
@@ -35,6 +36,12 @@
 | `*_create_obra_artistas.exs` | Junção N:N `obra_artistas` |
 | `*_create_permissoes.exs` | `permissoes` (id, `usuario_id`, `obra_id`, `tipo` enum `editor`) |
 | `*_create_favoritos.exs` | `favoritos` (id, `usuario_id`, `obra_id`, unique em `[usuario_id, obra_id]`) |
+
+### Migration adicional em 0.6.0
+
+| Migration | Tabelas / colunas principais |
+|---|---|
+| `*_create_comentarios.exs` | `comentarios` (id, `usuario_id` FK, `obra_id` FK nullable, `capitulo_id` FK nullable, `texto`, timestamps). **Check** garante que exatamente um entre `obra_id` e `capitulo_id` está preenchido. Indexes em `(obra_id)`, `(capitulo_id)`, `(usuario_id)`. |
 
 > Restrições de check são aplicadas **na definição de coluna** (ex.: `add :email, :string, collate: :nocase, check: %{...}`), conforme restrição do `ecto_sqlite3` documentada no AGENTS.md.
 
@@ -133,7 +140,7 @@ Demais cores derivadas são registradas como variáveis Tailwind no `app.css`. S
 - LiveView `UserAuth.Login` (modal `modal-fenix.png`) e `UserAuth.Registration`.
 - `on_mount :assign_current_scope` para popular `@current_scope`.
 - Pipeline `require_authenticated_user` para rotas privadas.
-- Recuperação de senha **adiada** para 0.8.0.
+- Recuperação de senha **adiada** para 0.9.0.
 
 ### Foto de perfil (RF11) — primeiro uso do RustFS
 - Upload no registro/edição: `usuarios/<id>/profile/profile.webp`.
@@ -221,7 +228,7 @@ Demais cores derivadas são registradas como variáveis Tailwind no `app.css`. S
 ### Home (`home-page-fenix.png`)
 - Header com gradiente, logo, navegação (`Início`, `Manhwas`, `Novels`, `Concluídos`), busca por título, botões `Entrar` / `Cadastrar` (quando deslogado).
 - Seção **"Atualizados Recentemente"**: cards de obras com capa, título, dois últimos capítulos e badge "NOVO".
-- Sidebar **"Os Mais Lidos"**: top 5 (dados preliminares; ETS real entra em 0.6.0).
+- Sidebar **"Os Mais Lidos"**: top 5 (dados preliminares; ETS real entra em 0.7.0).
 
 ### Listagens
 - `/manhwas`, `/novels`, `/concluidos` com paginação e filtros por gênero.
@@ -245,7 +252,68 @@ Demais cores derivadas são registradas como variáveis Tailwind no `app.css`. S
 
 ---
 
-## 0.6.0 — ETS table para contabilização
+## 0.6.0 — Comentários em obras e capítulos (RF13, RF14)
+
+### Migration
+- `*_create_comentarios.exs`:
+  - `id`, `usuario_id` (FK, NOT NULL, `on_delete: :delete_all`), `obra_id` (FK nullable, `on_delete: :delete_all`), `capitulo_id` (FK nullable, `on_delete: :delete_all`), `texto` (`string`, NOT NULL), `inserted_at`, `updated_at`.
+  - **Check no nível de coluna** garantindo que exatamente um entre `obra_id` e `capitulo_id` é não-nulo (SQLite não tem polimórfico nativo; o check é a forma correta, conforme AGENTS.md).
+  - Indexes: `(obra_id)`, `(capitulo_id)`, `(usuario_id)`.
+  - Check em `texto`: `length(texto) > 0 AND length(texto) <= 2000`.
+
+### Schema
+- `Fenix.Content.Comentario` em `lib/fenix/content/comentario.ex`:
+  - `belongs_to :usuario, Fenix.Accounts.Usuario`
+  - `belongs_to :obra, Fenix.Catalog.Obra`
+  - `belongs_to :capitulo, Fenix.Content.Capitulo`
+  - `field :texto, :string`
+  - `changeset/2`: `cast([:texto, :obra_id, :capitulo_id, :usuario_id])`; `validate_required([:usuario_id, :texto])`; `validate_length(:texto, min: 1, max: 2000)`; valida que exatamente um parent (`obra_id` xor `capitulo_id`) está setado.
+  - Note: `usuario_id` é setado **programaticamente** (a partir de `@current_scope.user.id`), portanto **não** entra em `cast` na criação (regra do AGENTS.md).
+
+### Context
+- `Fenix.Content` ganha:
+  - `list_comentarios_for_obra/1` (preload `:usuario`).
+  - `list_comentarios_for_capitulo/1` (preload `:usuario`).
+  - `create_comentario/2` (current_user, attrs com `obra_id` ou `capitulo_id`).
+  - `update_comentario/3` (current_user, comentario, attrs) — só o autor.
+  - `delete_comentario/2` (current_user, comentario) — autor ou `role == :administrador`.
+
+### LiveSession `:authenticated`
+- A stub de 0.1.0 vira real: `on_mount: [{FenixWeb.UserAuth, :assign_current_scope}]`.
+- `FenixWeb.UserAuth` (de 0.1.0/0.2.0) implementa o `current_scope/1` real.
+- O form de comentário só renderiza se `@current_scope.user` está presente.
+
+### UI
+- Em `/obras/:id` (página da obra) — seção **"Comentários"** (RF13):
+  - Form `<.form for={@comentario_form} id="obra-#{@obra.id}-comentario-form" phx-submit="criar_comentario_obra">` com `<textarea>` + botão `Comentar` — visível só para usuários logados.
+  - Lista de comentários com `avatar + nome + data relativa + texto + botão Deletar` (visível só para autor ou admin).
+  - Visitante anônimo vê a lista + prompt `Faça login para comentar`.
+- Em `/obras/:id/capitulos/:cap_id` (leitor) — seção **"Comentários do capítulo"** (RF14): idem, evento `phx-submit="criar_comentario_capitulo"`.
+- Streams do LiveView (`stream(socket, :comentarios_obra, ...)`) para evitar ballooning.
+- Otimistic UI: comentário aparece imediatamente após submit, antes da confirmação do servidor.
+
+### CSRF
+- Todos os forms via `<.form for={@comentario_form} ...>` (Phoenix injeta o token automaticamente).
+- Verificação de aceitação: inspecionar HTML do form em dev deve mostrar `name="_csrf_token"`.
+
+### SEO
+- Obra e capítulo continuam indexáveis (RNF06); o `current_scope` não vaza para o SSR.
+- Lista de comentários é carregada via LiveView patch — não vai no HTML inicial do SSR, evitando conteúdo duplicado/spam indexado.
+- Se for criada uma rota dedicada `/obras/:id/comentarios` no futuro, ela recebe `<meta name="robots" content="noindex">` por padrão (RNF06).
+
+### Critérios de aceitação
+- `mix ecto.migrate` cria `comentarios` com check constraint ativo.
+- Usuário `leitor` logado consegue postar comentário em obra e em capítulo.
+- Comentário aparece na lista imediatamente (LiveView stream).
+- Autor do comentário vê botão `Deletar` e consegue remover.
+- `administrador` consegue deletar qualquer comentário.
+- Visitante anônimo vê os comentários existentes mas o form não é renderizado.
+- Token CSRF presente em todos os POSTs (verificar via `<.form>`).
+- `mix precommit` limpo.
+
+---
+
+## 0.7.0 — ETS table para contabilização
 
 ### Por que ETS (e não DB direto)
 - Cada abertura de capítulo é uma escrita. Gravar no SQLite3 a cada visita cria contenção (limite de uma escrita por vez).
@@ -270,7 +338,7 @@ Demais cores derivadas são registradas como variáveis Tailwind no `app.css`. S
 
 ---
 
-## 0.7.0 — Favoritos
+## 0.8.0 — Favoritos
 
 ### Backend
 - `Fenix.Catalog.favorite/2`, `unfavorite/2`, `favorited?/2`, `list_user_favorites/1`.
@@ -282,7 +350,7 @@ Demais cores derivadas são registradas como variáveis Tailwind no `app.css`. S
 - Página `/favoritos` listando as obras favoritadas pelo usuário logado.
 
 ### Home atualizada
-- "Os Mais Lidos" agora consulta ETS em tempo real (já estava em 0.6.0, aqui ganha polimento visual).
+- "Os Mais Lidos" agora consulta ETS em tempo real (já estava em 0.7.0, aqui ganha polimento visual).
 
 ### Critérios de aceitação
 - Usuário logado favorita e desfavorita; estado persiste entre sessões.
@@ -290,7 +358,7 @@ Demais cores derivadas são registradas como variáveis Tailwind no `app.css`. S
 
 ---
 
-## 0.8.0 — Editor e permissões por obra
+## 0.9.0 — Editor e permissões por obra
 
 ### Modelo `Permissao` (RF02)
 - Tabela `permissoes` (já existente desde 0.1.0) entra em uso.
@@ -315,7 +383,7 @@ Demais cores derivadas são registradas como variáveis Tailwind no `app.css`. S
 
 ---
 
-## 0.9.0 — Upload-atalho de capítulos (síncrono)
+## 0.10.0 — Upload-atalho de capítulos (síncrono)
 
 ### Tela de upload (`Admin.Obra.UploadZip`)
 - Botão "Adicionar capítulos" no detalhe da obra abre modal.
@@ -383,23 +451,25 @@ Demais cores derivadas são registradas como variáveis Tailwind no `app.css`. S
 
 | Req | Versão que o atende |
 |---|---|
-| RF01 (admin gerencia tudo) | 0.3.0 + 0.8.0 |
-| RF02 (editor gerencia suas obras) | 0.8.0 |
+| RF01 (admin gerencia tudo) | 0.3.0 + 0.9.0 |
+| RF02 (editor gerencia suas obras) | 0.9.0 |
 | RF03 (cadastro padrão `leitor`) | 0.2.0 |
-| RF04 (favoritar) | 0.7.0 |
-| RF05 (top 10 mais lidos) | 0.6.0 |
-| RF06 (contabilização de acessos) | 0.6.0 |
+| RF04 (favoritar) | 0.8.0 |
+| RF05 (top 10 mais lidos) | 0.7.0 |
+| RF06 (contabilização de acessos) | 0.7.0 |
 | RF07 (capítulos ↔ obra) | 0.4.0 |
 | RF08 (páginas ↔ capítulo) | 0.4.0 |
 | RF09 (autores/gêneros/artistas ↔ obra) | 0.3.0 |
 | RF10 (webp em capítulos de mangá) | 0.4.0 |
 | RF11 (foto de perfil) | 0.2.0 |
 | RF12 (páginas ordenadas / rich-text) | 0.4.0 |
+| RF13 (comentários em obras) | 0.6.0 |
+| RF14 (comentários em capítulos) | 0.6.0 |
 | RNF01 (web) | base |
-| RNF02 (papéis) | 0.2.0 + 0.8.0 |
+| RNF02 (papéis) | 0.2.0 + 0.9.0 |
 | RNF03 (usabilidade) | todas |
 | RNF04 (responsivo) | todas |
-| RNF05 (performance) | 0.6.0 (ETS) + 1.0.0 (Oban) |
+| RNF05 (performance) | 0.7.0 (ETS) + 1.0.0 (Oban) |
 | RNF06 (SEO) | 0.5.0 (base) + 1.0.0 (sitemap) |
 
 ### Critérios de aceitação finais

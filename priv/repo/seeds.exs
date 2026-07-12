@@ -1,11 +1,35 @@
-# Script for populating the database. You can run it as:
-#
-#     mix run priv/repo/seeds.exs
-#
-# Inside the script, you can read and write to any of your
-# repositories directly:
-#
-#     Fenix.Repo.insert!(%Fenix.SomeSchema{})
-#
-# We recommend using the bang functions (`insert!`, `update!`
-# and so on) as they will fail if something goes wrong.
+alias Fenix.{Repo, Catalog.Genero}
+
+generos = [
+  "Ação",
+  "Aventura",
+  "Comédia",
+  "Drama",
+  "Fantasia",
+  "Horror",
+  "Romance",
+  "Sci-Fi",
+  "Slice of Life",
+  "Sobrenatural",
+  "Mistério",
+  "Esportes",
+  "Psicológico",
+  "Isekai",
+  "Murim",
+  "Harem",
+  "Ecchi",
+  "Seinen",
+  "Shounen",
+  "Josei",
+  "Mecânica",
+  "Magia",
+  "Cultivo",
+  "Regressão",
+  "Sistema"
+]
+
+for nome <- generos do
+  %Genero{}
+  |> Genero.changeset(%{nome: nome})
+  |> Repo.insert!(on_conflict: :nothing, conflict_target: :nome)
+end

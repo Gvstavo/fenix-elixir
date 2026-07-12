@@ -86,6 +86,8 @@ defmodule FenixWeb do
       import Phoenix.HTML
       # Core UI components
       import FenixWeb.CoreComponents
+      import FenixWeb.SEO
+      import FenixWeb.URIHelpers
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

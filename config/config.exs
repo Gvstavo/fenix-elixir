@@ -11,6 +11,8 @@ config :fenix,
   ecto_repos: [Fenix.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+config :fenix, Fenix.Repo, default_transaction_mode: :immediate
+
 # Configure the endpoint
 config :fenix, FenixWeb.Endpoint,
   url: [host: "localhost"],
